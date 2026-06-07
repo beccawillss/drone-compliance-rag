@@ -1,66 +1,57 @@
-from langchain_openai import ChatOpenAI
-from langchain_community.vectorstores import Chroma
+from langchain_community.document_loaders import (
+    TextLoader,
+    DirectoryLoader,
+    PyPDFLoader,
+)
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_community.vectorstores import Chroma
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 
-def get_vectorstore(presist_dir: str = "./vectorstore"):
-    """Load the existing Chroma vector store"""
+def load_documents(docs_dir: str = "./docs"):
+    """Load all supported documents from a directory."""
+    loaders = {
+        ".txt": TextLoader,
+        ".pdf": PyPDFLoader,
+    }
+    documents = []
+    for file in os.listdir(docs_dir):
+        ext = os.path.splitext(file)[1].lower()
+        if ext in loaders:
+            loader = loaders[ext](os.path.join(docs_dir, file))
+            documents.extend(loader.load())
+    print(f"Loaded {len(documents)} documents")
+    return documents
+
+
+def split_documents(documents, chunk_size=1000, chunk_overlap=200):
+    """Split documents into chunks for indexing."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["nn", "n", ". ", " ", ""],
+    )
+    chunks = splitter.split_documents(documents)
+    print(f"Split into {len(chunks)} chunks")
+    return chunks
+
+
+def create_vectorstore(chunks, persist_dir: str = "./vectorstore"):
+    """Create a Chroma vector store from document chunks."""
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    return Chroma(
-        persist_directory=presist_dir,
-        embedding_function=embeddings,
+    vectorstore = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=persist_dir,
     )
-
-
-def format_docs(docs):
-    """Format the retrieved docs into a single string."""
-    return "nn---nn".join(
-        f"Source: {doc.metadata.get('source', 'unknown')}n{doc.page_content}"
-        for doc in docs
-    )
-
-
-def create_rag_chain():
-    """Build the RAG chain using LCEL"""
-    vectorstore = get_vectorstore()
-    retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": 4}
-    )
-
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.1)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a helpful assistant that answers questions 
-based on the provided context. Always cite which source document 
-your answer comes from. If the context does not contain enough 
-information to answer, say so honestly.
-         
-Context:
-{context}"""),
-        MessagesPlaceholder(variable_name="chat_history", optional=True),
-        ("human", "{question}"),
-    ])
-
-    rag_chain = (
-        RunnableParallel(
-            context=retriever | format_docs,
-            question=RunnablePassthrough(),
-        )
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-    return rag_chain
+    print(f"Created vector store with {vectorstore._collection.count()} vectors")
+    return vectorstore
 
 
 if __name__ == "__main__":
-    chain = create_rag_chain()
-    response = chain.invoke("What is this document about?")
-    print(response)
+    docs = load_documents()
+    chunks = split_documents(docs)
+    vectorstore = create_vectorstore(chunks)
